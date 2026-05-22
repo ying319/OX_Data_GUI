@@ -15,6 +15,8 @@ This folder is a portable copy of the ARTIQ data GUI.
 - `requirements-portable.txt`: packages that should be installed into the local Python environment.
 - `setup_env.bat`: creates a `.venv` and installs requirements.
 - `run_gui.bat`: starts the GUI.
+- `setup_env.sh`: creates a `.venv` and installs requirements on Linux.
+- `run_gui.sh`: starts the GUI on Linux.
 
 Large/binary packages such as `PyQt5`, `numpy`, `h5py`, `matplotlib`, and `scipy`
 are installed by `pip` rather than copied into `vendor/`.
@@ -52,13 +54,68 @@ PowerShell in this folder and run:
 .\run_gui.bat
 ```
 
+## First-Time Setup On Linux
+
+1. Install Python 3 and the Qt system libraries. On Ubuntu/Debian, run:
+
+   ```bash
+   sudo apt update
+   sudo apt install python3 python3-venv python3-pip libxcb-cursor0
+   ```
+
+   Other Linux distributions may use different package names, but you need
+   Python 3, `venv`, `pip`, and the Qt/XCB runtime libraries used by PyQt5.
+
+2. Get this project folder onto the computer:
+   - If using GitHub, click `Code` > `Download ZIP`, then unzip it.
+   - Or use Git:
+
+     ```bash
+     git clone https://github.com/ying319/portable-OX-Data-gui.git
+     cd portable-OX-Data-gui
+     ```
+
+   - Or copy the whole folder from another computer.
+
+3. Open a terminal in the project folder.
+4. Make the helper scripts executable:
+
+   ```bash
+   chmod +x setup_env.sh run_gui.sh
+   ```
+
+5. Create a local virtual environment and install the Python packages:
+
+   ```bash
+   ./setup_env.sh
+   ```
+
+6. Start the GUI:
+
+   ```bash
+   ./run_gui.sh
+   ```
+
+After the first setup, you normally only need to run `./run_gui.sh` from the
+project folder.
+
+If the GUI fails to start with a Qt platform plugin error, install your
+distribution's PyQt5/Qt XCB support packages. On Ubuntu/Debian, `libxcb-cursor0`
+is the most common missing package.
+
 ## Opening Data
 
-1. Start the GUI with `run_gui.bat`.
+1. Start the GUI with `run_gui.bat` on Windows, or `./run_gui.sh` on Linux.
 2. Set `Results root` to the ARTIQ results folder, for example:
 
    ```text
    Z:\artiqResults\lab1_bob
+   ```
+
+   On Linux this will usually be a mounted path, for example:
+
+   ```text
+   /mnt/artiqResults/lab1_bob
    ```
 
 3. Click `Refresh` or wait automatic refresh.
