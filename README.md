@@ -21,14 +21,36 @@ are installed by `pip` rather than copied into `vendor/`.
 
 ## First-Time Setup On Another Windows PC
 
-1. Install Python 3.12 or another recent Python 3 version.
-2. Copy this whole portable folder to the PC.
-3. Double-click `setup_env.bat`.
-4. Wait for the package installation to finish.
-5. Double-click `run_gui.bat`.
+1. Install Python 3.12 or another recent Python 3 version from python.org.
+2. Get this project folder onto the PC:
+   - If using GitHub, click `Code` > `Download ZIP`, then unzip it.
+   - Or use Git:
+
+     ```powershell
+     git clone https://github.com/ying319/portable-OX-Data-gui.git
+     ```
+
+   - Or copy the whole folder from another computer.
+3. Open the project folder.
+4. Double-click `setup_env.bat`.
+5. Wait for the package installation to finish. This creates a local `.venv`
+   folder and installs the required Python packages.
+6. Double-click `run_gui.bat` to start the GUI.
+
+After the first setup, you normally only need to double-click `run_gui.bat`.
 
 If `setup_env.bat` cannot find `py`, install Python from python.org and make sure
 the Python Launcher option is enabled.
+
+## Running From PowerShell
+
+If you prefer using PowerShell instead of double-clicking the batch files, open
+PowerShell in this folder and run:
+
+```powershell
+.\setup_env.bat
+.\run_gui.bat
+```
 
 ## Opening Data
 

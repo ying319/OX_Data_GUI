@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
