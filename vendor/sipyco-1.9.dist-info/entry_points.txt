@@ -1,0 +1,2 @@
+[console_scripts]
+sipyco_rpctool = sipyco.sipyco_rpctool:main

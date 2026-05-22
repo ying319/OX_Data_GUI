@@ -1,0 +1,4 @@
+[console_scripts]
+oitg_fetch=oitg.frontend.oitg_fetch:main
+oitg_index_rids=oitg.frontend.oitg_index_rids:main
+

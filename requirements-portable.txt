@@ -1,0 +1,9 @@
+h5py
+matplotlib
+numpy
+PyQt5
+scipy
+lmfit
+allantools
+colorama
+statsmodels

@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: ndscan
+Version: 0.4.0
+Summary: Composable experiment fragments and multi-dimensional scans for ARTIQ
+Author-email: David Nadlinger <code@klickverbot.at>
+License-Expression: LGPL-3.0-or-later
+License-File: LICENSE
+License-File: LICENSE.GPL-3
+Requires-Python: >=3.10
+Requires-Dist: artiq>=8.0.dev0
+Requires-Dist: h5py>=3.8.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: oitg
+Requires-Dist: pyqt6>=6.5.2
+Requires-Dist: pyqtgraph>=0.13.3
+Requires-Dist: qasync>=0.27.1
+Requires-Dist: sipyco

@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: sipyco
+Version: 1.9
+Summary: Simple Python communications
+Home-page: https://m-labs.hk/artiq
+Author: M-Labs
+License: LGPLv3+
+License-File: LICENSE
+Requires-Dist: numpy
+Dynamic: author
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: summary

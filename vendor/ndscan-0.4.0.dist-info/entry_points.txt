@@ -1,0 +1,4 @@
+[console_scripts]
+ndscan_dataset_janitor = ndscan.dataset_janitor:main
+ndscan_show = ndscan.show:main
+ndscan_to_txt = ndscan.to_txt:main

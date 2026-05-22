@@ -1,0 +1,12 @@
+qasync-0.27.2.dist-info/INSTALLER,sha256=5hhM4Q4mYTT9z6QB6PGpUAW81PGNFrYrdXMj4oM_6ak,2
+qasync-0.27.2.dist-info/METADATA,sha256=aJWLdP0vb73K42LYQJeopp4HPjOSFZEtnKUTTGiOj1M,4593
+qasync-0.27.2.dist-info/RECORD,,
+qasync-0.27.2.dist-info/REQUESTED,sha256=47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU,0
+qasync-0.27.2.dist-info/WHEEL,sha256=Vz2fHgx6HFtSwhs8KvkHLqH5Ea4w1_rner5uNVGCeIE,88
+qasync-0.27.2.dist-info/direct_url.json,sha256=T25KW9jUU4dgGpZ1tGjwElJtroBfP8K7eNpQOWZ2z-U,178
+qasync-0.27.2.dist-info/licenses/LICENSE,sha256=JsJG3viOR9LiLbtkJSjODjFXmT8A7JIeFKgFWKdCxvA,1413
+qasync-0.27.2.dist-info/uv_build.json,sha256=RBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o,2
+qasync/__init__.py,sha256=JWLCVZZ6oRDCIfRaBt-2uRlLxJNpeDsZTauB1xDRXFw,30995
+qasync/_common.py,sha256=8jnn8QGNQuSDxIhCgGufN5z7tBuI8iRQhxqdCvtU13I,655
+qasync/_unix.py,sha256=ZKPnKDYlLGDzulrMQNory1QTmlyDtfTOomEDnSIxnA4,6511
+qasync/_windows.py,sha256=-7h34rRIU7NOpUrdqj4WYQLg3GcI6UZGUIUIVjZnZB4,7310
