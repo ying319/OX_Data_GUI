@@ -17,6 +17,8 @@ This folder is a portable copy of the ARTIQ data GUI.
 - `run_gui.bat`: starts the GUI.
 - `setup_env.sh`: creates a `.venv` and installs requirements on Linux.
 - `run_gui.sh`: starts the GUI on Linux.
+- `setup_env.command`: creates a `.venv` and installs requirements on macOS.
+- `run_gui.command`: starts the GUI on macOS.
 
 Large/binary packages such as `PyQt5`, `numpy`, `h5py`, `matplotlib`, and `scipy`
 are installed by `pip` rather than copied into `vendor/`.
@@ -103,19 +105,67 @@ If the GUI fails to start with a Qt platform plugin error, install your
 distribution's PyQt5/Qt XCB support packages. On Ubuntu/Debian, `libxcb-cursor0`
 is the most common missing package.
 
+## First-Time Setup On macOS
+
+1. Install Python 3 from python.org or with Homebrew:
+
+   ```bash
+   brew install python
+   ```
+
+   If you do not use Homebrew, the installer from python.org is fine.
+
+2. Get this project folder onto the Mac:
+   - If using GitHub, click `Code` > `Download ZIP`, then unzip it.
+   - Or use Git:
+
+     ```bash
+     git clone https://github.com/ying319/portable-OX-Data-gui.git
+     cd portable-OX-Data-gui
+     ```
+
+   - Or copy the whole folder from another computer.
+
+3. Open Terminal in the project folder and make the macOS helper files executable:
+
+   ```bash
+   chmod +x setup_env.command run_gui.command
+   ```
+
+4. Run the setup:
+   - Double-click `setup_env.command`, or run:
+
+     ```bash
+     ./setup_env.command
+     ```
+
+5. Start the GUI:
+   - Double-click `run_gui.command`, or run:
+
+     ```bash
+     ./run_gui.command
+     ```
+
+After the first setup, you normally only need to double-click `run_gui.command`.
+
+If macOS says the file cannot be opened because it is from an unidentified
+developer, right-click the `.command` file, choose `Open`, then confirm.
+
 ## Opening Data
 
-1. Start the GUI with `run_gui.bat` on Windows, or `./run_gui.sh` on Linux.
+1. Start the GUI with `run_gui.bat` on Windows, `./run_gui.sh` on Linux, or
+   `run_gui.command` on macOS.
 2. Set `Results root` to the ARTIQ results folder, for example:
 
    ```text
    Z:\artiqResults\lab1_bob
    ```
 
-   On Linux this will usually be a mounted path, for example:
+   On Linux or macOS this will usually be a mounted path, for example:
 
    ```text
    /mnt/artiqResults/lab1_bob
+   /Volumes/artiqResults/lab1_bob
    ```
 
 3. Click `Refresh` or wait automatic refresh.

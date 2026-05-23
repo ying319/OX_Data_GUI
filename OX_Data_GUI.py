@@ -690,7 +690,7 @@ class NightlyMonitorGui(QMainWindow):
         del blocker
         current = self.file_list.currentItem()
         if current is None:
-            self.current_file = None
+            self.clear_selected_file()
             return
         result = current.data(Qt.UserRole)
         if auto_load_selected and isinstance(result, ResultFile) and (
@@ -700,6 +700,7 @@ class NightlyMonitorGui(QMainWindow):
 
     def file_selected(self, current: QListWidgetItem | None) -> None:
         if current is None:
+            self.clear_selected_file()
             return
         result = current.data(Qt.UserRole)
         if not isinstance(result, ResultFile):
@@ -717,6 +718,20 @@ class NightlyMonitorGui(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.update_path_status(Path(self.path_edit.text()).expanduser())
+
+    def clear_selected_file(self) -> None:
+        self.current_file = None
+        self.current_infos = {}
+        self.close_ndscan_plot()
+        self.ndscan_plot_button.setEnabled(False)
+        self.dataset_list.clear()
+        self.archive_table.setRowCount(0)
+        self.fit_table.setRowCount(0)
+        self.meta_text.clear()
+        self.clear_raw_table()
+        self.x_combo.clear()
+        self.x_combo.addItem("Index / scalar history")
+        self.show_blank_matplotlib_plot()
 
     def format_file_label(self, result: ResultFile) -> str:
         rid = "" if result.rid is None else str(result.rid)
@@ -774,6 +789,11 @@ class NightlyMonitorGui(QMainWindow):
 
     def show_matplotlib_plot(self) -> None:
         self.plot_stack.setCurrentWidget(self.canvas)
+
+    def show_blank_matplotlib_plot(self) -> None:
+        self.show_matplotlib_plot()
+        self.canvas.clear()
+        self.canvas.draw()
 
     def show_ndscan_plot(self, result: ResultFile) -> None:
         self.close_ndscan_plot()
