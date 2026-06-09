@@ -13,6 +13,7 @@ import ast
 import csv
 import json
 import os
+import re
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -24,11 +25,13 @@ import h5py
 import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt5.QtCore import QSignalBlocker, QTimer, Qt
+from PyQt5.QtCore import QDate, QSignalBlocker, QTimer, Qt
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -41,9 +44,12 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -52,11 +58,19 @@ from ndscan_gui_bridge import NdscanPlotError, create_ndscan_plot_widget
 
 
 DEFAULT_RESULTS_DIR = "Z:\\artiqResults\\lab1_bob"
+DEFAULT_LOG_DIR = "Z:\\artiqResults\\lab1_bob\\log"
 NUMERIC_KINDS = set("biufc")
 NIGHTLY_START_HOUR = 1
 NIGHTLY_END_HOUR = 7
 SUMMARY_READ_WORKERS = 8
 SCAN_WORKERS = 1
+LOG_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+LOG_TIMESTAMP_RE = re.compile(
+    r"^\[?(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):\d{2}:\d{2}(?:[.,]\d+)?\]?"
+)
+LOG_LEVEL_RE = re.compile(r"\b(CRITICAL|ERROR|WARNING|WARN|INFO|DEBUG|TRACE)\b", re.IGNORECASE)
+LOG_PREVIEW_LINES = 20_000
+LOG_FILE_LIST_LIMIT = 50
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,14 @@ class DatasetInfo:
     @property
     def label(self) -> str:
         return f"{self.root}/{self.key}"
+
+
+@dataclass(frozen=True)
+class LogFile:
+    path: Path
+    date: str
+    mtime: float
+    size: int
 
 
 def _decode(value: Any) -> Any:
@@ -283,6 +305,7 @@ class NightlyMonitorGui(QMainWindow):
         self.current_file: ResultFile | None = None
         self.ndscan_widget: QWidget | None = None
         self.ndscan_h5_file: h5py.File | None = None
+        self.log_files: list[LogFile] = []
 
         initial_root, used_home_fallback = default_results_root()
         self.path_edit = QLineEdit(initial_root)
@@ -331,6 +354,34 @@ class NightlyMonitorGui(QMainWindow):
         self.raw_table = QTableWidget(0, 0)
         self.raw_table.setAlternatingRowColors(True)
         self.export_raw_button = QPushButton("Export CSV")
+
+        self.log_path_edit = QLineEdit(DEFAULT_LOG_DIR)
+        self.log_path_edit.setMaximumWidth(520)
+        self.log_browse_button = QPushButton("Browse")
+        self.log_refresh_button = QPushButton("Refresh")
+        self.log_date_edit = QDateEdit()
+        self.log_date_edit.setCalendarPopup(True)
+        self.log_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.log_date_edit.setDate(QDate.currentDate())
+        self.log_latest_only = QCheckBox("Latest 50")
+        self.log_latest_only.setChecked(True)
+        self.log_latest_only.setToolTip("Show the most recent 50 log files across all dates.")
+        self.log_filter_edit = QLineEdit()
+        self.log_filter_edit.setPlaceholderText("Filter log text...")
+        self.log_time_filter = QCheckBox("1am-7am only")
+        self.log_time_filter.setToolTip("Show log entries timestamped from 01:00 up to before 07:00.")
+        self.log_status = QLabel()
+        self.log_status.setMinimumWidth(220)
+        self.log_status.setStyleSheet("color: #9a5a00;")
+        self.log_file_list = QListWidget()
+        self.log_text = QTreeWidget()
+        self.log_text.setHeaderHidden(True)
+        self.log_text.setUniformRowHeights(True)
+        self.log_text.setRootIsDecorated(True)
+        self.log_text.setAlternatingRowColors(True)
+        log_font = QFont("Consolas")
+        log_font.setStyleHint(QFont.Monospace)
+        self.log_text.setFont(log_font)
 
         self.canvas = PlotCanvas()
         self.plot_stack = QStackedWidget()
@@ -416,11 +467,58 @@ class NightlyMonitorGui(QMainWindow):
         main_split.addWidget(details_split)
         main_split.setSizes([360, 650, 290])
 
+        data_tab = QWidget()
+        data_layout_root = QVBoxLayout(data_tab)
+        data_layout_root.addLayout(top)
+        data_layout_root.addWidget(main_split, 1)
+
+        log_tab = self.build_log_tab()
+
+        tabs = QTabWidget()
+        tabs.addTab(data_tab, "Data")
+        tabs.addTab(log_tab, "Logs")
+
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.addLayout(top)
-        layout.addWidget(main_split, 1)
+        layout.addWidget(tabs)
         self.setCentralWidget(root)
+
+    def build_log_tab(self) -> QWidget:
+        top = QHBoxLayout()
+        top.setSpacing(4)
+        top.addWidget(QLabel("Log root"))
+        top.addWidget(self.log_path_edit)
+        top.addWidget(self.log_browse_button)
+        top.addWidget(self.log_refresh_button)
+        top.addWidget(QLabel("Date"))
+        top.addWidget(self.log_date_edit)
+        top.addWidget(self.log_latest_only)
+        top.addWidget(self.log_status)
+
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter"))
+        filter_row.addWidget(self.log_filter_edit)
+        filter_row.addWidget(self.log_time_filter)
+
+        list_box = QGroupBox("Log Files")
+        list_layout = QVBoxLayout(list_box)
+        list_layout.addWidget(self.log_file_list)
+
+        content_box = QGroupBox("Log Content")
+        content_layout = QVBoxLayout(content_box)
+        content_layout.addLayout(filter_row)
+        content_layout.addWidget(self.log_text)
+
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(list_box)
+        split.addWidget(content_box)
+        split.setSizes([320, 900])
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addLayout(top)
+        layout.addWidget(split, 1)
+        return tab
 
     def _connect(self) -> None:
         self.browse_button.clicked.connect(self.choose_root)
@@ -435,6 +533,262 @@ class NightlyMonitorGui(QMainWindow):
         self.plot_button.clicked.connect(self.plot_selected)
         self.history_button.clicked.connect(self.plot_history)
         self.export_raw_button.clicked.connect(self.export_raw_csv)
+        self.log_browse_button.clicked.connect(self.choose_log_root)
+        self.log_refresh_button.clicked.connect(self.refresh_logs)
+        self.log_date_edit.dateChanged.connect(lambda _date: self.populate_log_file_list())
+        self.log_latest_only.stateChanged.connect(lambda _state: self.populate_log_file_list())
+        self.log_filter_edit.textChanged.connect(lambda _text: self.load_selected_log())
+        self.log_time_filter.stateChanged.connect(lambda _state: self.load_selected_log())
+        self.log_file_list.currentItemChanged.connect(lambda current, _previous: self.log_file_selected(current))
+        QTimer.singleShot(0, self.refresh_logs)
+
+    def choose_log_root(self) -> None:
+        start_dir = Path(self.log_path_edit.text()).expanduser()
+        if not path_is_available(start_dir):
+            start_dir = Path.home()
+            self.show_log_status("Current path is invalid; browse opened from your home folder.")
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select ARTIQ log directory", str(start_dir)
+        )
+        if directory:
+            self.log_path_edit.setText(directory)
+            self.refresh_logs()
+
+    def show_log_status(self, message: str) -> None:
+        self.log_status.setText(message)
+        self.log_status.setToolTip(message)
+
+    def refresh_logs(self) -> None:
+        root = Path(self.log_path_edit.text()).expanduser()
+        if not path_is_available(root):
+            self.log_files = []
+            self.log_file_list.clear()
+            self.log_text.clear()
+            self.show_log_status("Log folder not found.")
+            return
+
+        self.log_files = self.collect_log_files(root)
+        if not self.log_files:
+            self.log_file_list.clear()
+            self.log_text.clear()
+            self.show_log_status("No dated .log files found.")
+            return
+
+        selected_date = self.log_date_edit.date().toString("yyyy-MM-dd")
+        available_dates = sorted({log_file.date for log_file in self.log_files})
+        if not self.log_latest_only.isChecked() and selected_date not in available_dates:
+            blocker = QSignalBlocker(self.log_date_edit)
+            self.log_date_edit.setDate(QDate.fromString(available_dates[-1], "yyyy-MM-dd"))
+            del blocker
+        self.populate_log_file_list()
+
+    def collect_log_files(self, root: Path) -> list[LogFile]:
+        log_files: list[LogFile] = []
+        try:
+            with os.scandir(root) as scan:
+                for item in scan:
+                    if not item.is_file() or item.name.startswith("."):
+                        continue
+                    match = LOG_DATE_RE.search(item.name)
+                    if match is None:
+                        continue
+                    lower_name = item.name.lower()
+                    if not (
+                        lower_name.endswith(".log")
+                        or lower_name == f"log.{match.group(1)}"
+                        or lower_name.endswith(f".{match.group(1)}")
+                    ):
+                        continue
+                    try:
+                        stat = item.stat()
+                    except OSError:
+                        continue
+                    log_files.append(
+                        LogFile(Path(item.path), match.group(1), stat.st_mtime, stat.st_size)
+                    )
+        except OSError as exc:
+            self.show_log_status(f"Could not scan log folder: {exc}")
+            return []
+        return sorted(log_files, key=lambda log_file: (log_file.date, log_file.path.name), reverse=True)
+
+    def populate_log_file_list(self) -> None:
+        selected_date = self.log_date_edit.date().toString("yyyy-MM-dd")
+        if self.log_latest_only.isChecked():
+            matching = self.log_files[:LOG_FILE_LIST_LIMIT]
+        else:
+            matching = [
+                log_file for log_file in self.log_files if log_file.date == selected_date
+            ][:LOG_FILE_LIST_LIMIT]
+        blocker = QSignalBlocker(self.log_file_list)
+        self.log_file_list.clear()
+        for log_file in matching:
+            size_text = self.format_size(log_file.size)
+            item = QListWidgetItem(f"{log_file.date}  {log_file.path.name} ({size_text})")
+            item.setData(Qt.UserRole, log_file)
+            self.log_file_list.addItem(item)
+        del blocker
+
+        if matching:
+            self.log_file_list.setCurrentRow(0)
+            if self.log_latest_only.isChecked():
+                self.show_log_status(f"Showing latest {len(matching)} log file(s).")
+            else:
+                self.show_log_status(f"{len(matching)} log file(s) for {selected_date}.")
+        else:
+            self.log_text.clear()
+            if self.log_latest_only.isChecked():
+                self.show_log_status("No log files found.")
+            else:
+                self.show_log_status(f"No log files for {selected_date}.")
+
+    def log_file_selected(self, current: QListWidgetItem | None) -> None:
+        if current is None:
+            self.log_text.clear()
+            return
+        self.load_selected_log()
+
+    def load_selected_log(self) -> None:
+        item = self.log_file_list.currentItem()
+        if item is None:
+            return
+        log_file = item.data(Qt.UserRole)
+        if not isinstance(log_file, LogFile):
+            return
+
+        filter_text = self.log_filter_edit.text().strip().lower()
+        time_filter_enabled = self.log_time_filter.isChecked()
+        self.log_text.clear()
+        shown = 0
+        total = 0
+        matched = 0
+        current_title = ""
+        current_children: list[str] = []
+        current_in_time_span = not time_filter_enabled
+
+        def flush_current() -> None:
+            nonlocal current_title, current_children, current_in_time_span, shown, matched
+            if not current_title:
+                return
+            if time_filter_enabled and not current_in_time_span:
+                current_title = ""
+                current_children = []
+                return
+            if filter_text:
+                title_matches = filter_text in current_title.lower()
+                matching_children = [
+                    child for child in current_children if filter_text in child.lower()
+                ]
+                if not title_matches and not matching_children:
+                    current_title = ""
+                    current_children = []
+                    return
+                display_children = current_children if title_matches else matching_children
+            else:
+                display_children = current_children
+
+            matched += 1 + len(display_children)
+            if shown < LOG_PREVIEW_LINES:
+                remaining = LOG_PREVIEW_LINES - shown
+                children_to_show = display_children[: max(0, remaining - 1)]
+                self.add_log_tree_entry(current_title, children_to_show)
+                shown += 1 + len(children_to_show)
+            current_title = ""
+            current_children = []
+
+        try:
+            with log_file.path.open("r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    total += 1
+                    text = line.rstrip("\n\r")
+                    timestamp_match = LOG_TIMESTAMP_RE.match(text)
+                    if timestamp_match is not None:
+                        flush_current()
+                        hour = int(timestamp_match.group(2))
+                        current_title = text
+                        current_children = []
+                        current_in_time_span = NIGHTLY_START_HOUR <= hour < NIGHTLY_END_HOUR
+                    elif current_title:
+                        current_children.append(text)
+                    else:
+                        current_title = text
+                        current_children = []
+                        current_in_time_span = not time_filter_enabled
+                flush_current()
+        except OSError as exc:
+            self.show_log_message(f"Could not read log file: {exc}", "error")
+            self.show_log_status("Could not read selected log file.")
+            return
+
+        if shown == 0:
+            self.show_log_message("No log entries match the current filters.", "debug")
+        elif shown < matched:
+            self.show_log_message(
+                f"Only the first {LOG_PREVIEW_LINES:,} matching lines are shown.",
+                "debug",
+            )
+        if filter_text:
+            scope = "1am-7am " if time_filter_enabled else ""
+            self.show_log_status(
+                f"Showing {shown:,} of {matched:,} {scope}matching line(s) in {log_file.path.name}."
+            )
+        elif time_filter_enabled:
+            self.show_log_status(
+                f"Showing {shown:,} 1am-7am line(s) from {log_file.path.name}."
+            )
+        else:
+            self.show_log_status(f"Showing {shown:,} of {total:,} line(s) in {log_file.path.name}.")
+
+    def add_log_tree_entry(self, title: str, children: list[str]) -> None:
+        level = self.log_line_level(title)
+        parent = QTreeWidgetItem([title or " "])
+        self.apply_log_item_style(parent, level)
+        for child in children:
+            child_item = QTreeWidgetItem([child or " "])
+            self.apply_log_item_style(child_item, level)
+            parent.addChild(child_item)
+        self.log_text.addTopLevelItem(parent)
+
+    def show_log_message(self, message: str, level: str = "plain") -> None:
+        item = QTreeWidgetItem([message])
+        self.apply_log_item_style(item, level)
+        self.log_text.addTopLevelItem(item)
+
+    def log_line_level(self, line: str) -> str:
+        match = LOG_LEVEL_RE.search(line)
+        if match is None:
+            return "plain"
+        level = match.group(1).upper()
+        if level in {"CRITICAL", "ERROR"}:
+            return "error"
+        if level in {"WARNING", "WARN"}:
+            return "warning"
+        if level == "INFO":
+            return "info"
+        return "debug"
+
+    def apply_log_item_style(self, item: QTreeWidgetItem, level: str) -> None:
+        colors = {
+            "plain": (QColor("#242424"), QColor("#fbfbf8")),
+            "info": (QColor("#1f6f8b"), QColor("#eef8fc")),
+            "warning": (QColor("#8a5a00"), QColor("#fff6d8")),
+            "error": (QColor("#a52626"), QColor("#ffe8e8")),
+            "debug": (QColor("#6b7280"), QColor("#f1f3f5")),
+        }
+        foreground, background = colors.get(level, colors["plain"])
+        item.setForeground(0, foreground)
+        item.setBackground(0, background)
+        if level == "error":
+            font = item.font(0)
+            font.setBold(True)
+            item.setFont(0, font)
+
+    def format_size(self, size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{size} B"
+            value /= 1024
+        return f"{size} B"
 
     def choose_root(self) -> None:
         start_dir = Path(self.path_edit.text()).expanduser()
@@ -690,7 +1044,7 @@ class NightlyMonitorGui(QMainWindow):
         del blocker
         current = self.file_list.currentItem()
         if current is None:
-            self.clear_selected_file()
+            self.current_file = None
             return
         result = current.data(Qt.UserRole)
         if auto_load_selected and isinstance(result, ResultFile) and (
@@ -700,7 +1054,6 @@ class NightlyMonitorGui(QMainWindow):
 
     def file_selected(self, current: QListWidgetItem | None) -> None:
         if current is None:
-            self.clear_selected_file()
             return
         result = current.data(Qt.UserRole)
         if not isinstance(result, ResultFile):
@@ -718,20 +1071,6 @@ class NightlyMonitorGui(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.update_path_status(Path(self.path_edit.text()).expanduser())
-
-    def clear_selected_file(self) -> None:
-        self.current_file = None
-        self.current_infos = {}
-        self.close_ndscan_plot()
-        self.ndscan_plot_button.setEnabled(False)
-        self.dataset_list.clear()
-        self.archive_table.setRowCount(0)
-        self.fit_table.setRowCount(0)
-        self.meta_text.clear()
-        self.clear_raw_table()
-        self.x_combo.clear()
-        self.x_combo.addItem("Index / scalar history")
-        self.show_blank_matplotlib_plot()
 
     def format_file_label(self, result: ResultFile) -> str:
         rid = "" if result.rid is None else str(result.rid)
@@ -789,11 +1128,6 @@ class NightlyMonitorGui(QMainWindow):
 
     def show_matplotlib_plot(self) -> None:
         self.plot_stack.setCurrentWidget(self.canvas)
-
-    def show_blank_matplotlib_plot(self) -> None:
-        self.show_matplotlib_plot()
-        self.canvas.clear()
-        self.canvas.draw()
 
     def show_ndscan_plot(self, result: ResultFile) -> None:
         self.close_ndscan_plot()
