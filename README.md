@@ -175,6 +175,29 @@ If the selected file contains ndscan data, the center panel shows the ndscan plo
 automatically. If it is not an ndscan file, the GUI falls back to the built-in
 matplotlib plot area.
 
+## Opening Logs
+
+The `Logs` tab browses dated ARTIQ log files separately from HDF5 result files.
+By default it opens:
+
+```text
+Z:\artiqResults\lab1_bob\log
+```
+
+Use `Browse` if the log folder is somewhere else. The loader scans the selected
+folder for files with a `yyyy-mm-dd` date in the name and a log-style filename,
+including names such as `2026-06-09.log`, `controller.2026-06-09.log`, and
+`log.2026-06-09`.
+
+- `Latest 50`: shows the 50 most recent dated log files across all dates.
+- `Date`: when `Latest 50` is off, shows log files for the selected date.
+- `Filter`: searches the selected log file's displayed entries.
+- `1am-7am only`: shows entries timestamped from 01:00 up to before 07:00.
+
+Multi-line log entries are grouped under the timestamped first line, and warning
+or error lines are highlighted. Very large matching logs are previewed up to the
+first 20,000 displayed lines so the GUI stays responsive.
+
 ## Plot Modes
 
 - `Show ndscan Plot`: return to the embedded ndscan plot for the selected file.
@@ -194,7 +217,7 @@ changed.
 ## Files To Share
 
 Share the entire portable folder or the `portable_data_gui.zip` archive. Do not share only
-`nightly_monitor_GUI.py`, because the embedded ndscan plotting mode needs
+`OX_Data_GUI.py`, because the embedded ndscan plotting mode needs
 `ndscan_gui_bridge/` and `vendor/`.
 
 The receiver does not need to activate the original `artiq-oitg` environment.
