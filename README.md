@@ -20,8 +20,19 @@ This folder is a portable copy of the ARTIQ data GUI.
 - `setup_env.command`: creates a `.venv` and installs requirements on macOS.
 - `run_gui.command`: starts the GUI on macOS.
 
-Large/binary packages such as `PyQt5`, `numpy`, `h5py`, `matplotlib`, and `scipy`
-are installed by `pip` rather than copied into `vendor/`.
+The environment setup installs these packages from `requirements-portable.txt`:
+
+- `h5py`
+- `matplotlib`
+- `numpy`
+- `PyQt5`
+- `scipy`
+- `lmfit`
+- `allantools`
+- `colorama`
+- `statsmodels`
+
+These packages are installed by `pip` rather than copied into `vendor/`.
 
 ## First-Time Setup On Another Windows PC
 
