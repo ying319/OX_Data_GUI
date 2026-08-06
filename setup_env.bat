@@ -10,6 +10,15 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
+".venv\Scripts\python.exe" -m ensurepip --upgrade
+if errorlevel 1 (
+    echo.
+    echo Could not install pip into .venv.
+    echo Reinstall Python from python.org and include pip, then run setup_env.bat again.
+    pause
+    exit /b 1
+)
+
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -r requirements-portable.txt
 
