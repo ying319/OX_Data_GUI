@@ -1,0 +1,19 @@
+[project]
+name = "portable-ox-data-gui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "allantools",
+    "colorama",
+    "h5py",
+    "lmfit",
+    "matplotlib",
+    "numpy",
+    "pyqt5",
+    # Newer Qt runtime releases do not currently publish Windows wheels.
+    "pyqt5-qt5==5.15.2",
+    "scipy",
+    "statsmodels",
+]

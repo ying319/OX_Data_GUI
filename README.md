@@ -47,10 +47,12 @@ These packages are installed by `pip` rather than copied into `vendor/`.
 
    - Or copy the whole folder from another computer.
 3. Open the project folder.
-4. Double-click `setup_env.bat`.
-5. Wait for the package installation to finish. This creates a local `.venv`
+4. If the copied folder contains a `.venv` directory, delete that directory first.
+   Virtual environments contain machine-specific paths and cannot be copied between PCs.
+5. Double-click `setup_env.bat`.
+6. Wait for the package installation to finish. This creates a local `.venv`
    folder and installs the required Python packages.
-6. Double-click `run_gui.bat` to start the GUI.
+7. Double-click `run_gui.bat` to start the GUI.
 
 After the first setup, you normally only need to double-click `run_gui.bat`.
 
