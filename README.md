@@ -12,7 +12,9 @@ This folder is a portable copy of the ARTIQ data GUI.
   - `qasync`
   - `sipyco`
   - `oitg`
-- `requirements-portable.txt`: packages that should be installed into the local Python environment.
+- `pyproject.toml`: project metadata and direct Python dependencies used by `uv`.
+- `uv.lock`: exact, reproducible dependency versions used by `uv`.
+- `requirements-portable.txt`: dependency list used by the legacy setup scripts.
 - `setup_env.bat`: creates a `.venv` and installs requirements.
 - `run_gui.bat`: starts the GUI.
 - `setup_env.sh`: creates a `.venv` and installs requirements on Linux.
@@ -32,9 +34,57 @@ The environment setup installs these packages from `requirements-portable.txt`:
 - `colorama`
 - `statsmodels`
 
-These packages are installed by `pip` rather than copied into `vendor/`.
+These packages are installed into the project environment rather than copied into
+`vendor/`.
 
-## First-Time Setup On Another Windows PC
+## Setup And Run With uv
+
+This is the recommended setup for Windows, Linux, and macOS. Install
+[uv](https://docs.astral.sh/uv/getting-started/installation/), then open a
+terminal in the project folder and run:
+
+```text
+uv sync --locked
+uv run python OX_Data_GUI.py
+```
+
+`uv sync --locked` reads `pyproject.toml` and `uv.lock`, creates a local `.venv`
+if needed, and installs the locked dependency versions. `uv run` uses that
+environment and will keep it synchronized with the project files.
+
+To activate the environment for an interactive terminal instead, use:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# Linux or macOS
+source .venv/bin/activate
+```
+
+After activation, start the GUI with:
+
+```text
+python OX_Data_GUI.py
+```
+
+When dependencies change, update the project and lockfile with `uv add`, for
+example:
+
+```text
+uv add package-name
+```
+
+Commit both `pyproject.toml` and `uv.lock`. Do not copy or commit `.venv`, because
+virtual environments contain machine-specific files. On another computer, copy
+or clone the project and run `uv sync --locked` again.
+
+The platform-specific scripts below use Python's built-in `venv` and `pip` and
+remain available as an alternative when `uv` is not installed.
+
+## Alternative Windows Setup Without uv
 
 1. Install Python 3.12 or another recent Python 3 version from python.org.
 2. Get this project folder onto the PC:
@@ -59,7 +109,7 @@ After the first setup, you normally only need to double-click `run_gui.bat`.
 If `setup_env.bat` cannot find `py`, install Python from python.org and make sure
 the Python Launcher option is enabled.
 
-## Running From PowerShell
+## Alternative PowerShell Setup Without uv
 
 If you prefer using PowerShell instead of double-clicking the batch files, open
 PowerShell in this folder and run:
@@ -69,7 +119,7 @@ PowerShell in this folder and run:
 .\run_gui.bat
 ```
 
-## First-Time Setup On Linux
+## Alternative Linux Setup Without uv
 
 1. Install Python 3 and the Qt system libraries. On Ubuntu/Debian, run:
 
@@ -118,7 +168,7 @@ If the GUI fails to start with a Qt platform plugin error, install your
 distribution's PyQt5/Qt XCB support packages. On Ubuntu/Debian, `libxcb-cursor0`
 is the most common missing package.
 
-## First-Time Setup On macOS
+## Alternative macOS Setup Without uv
 
 1. Install Python 3 from python.org or with Homebrew:
 
