@@ -25,15 +25,19 @@ import h5py
 import numpy as np
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt5.QtCore import QDate, QSignalBlocker, QTimer, Qt
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import QDate, QPointF, QSignalBlocker, QTimer, Qt
+from PyQt5.QtGui import QColor, QFont, QIcon, QPalette, QTextCharFormat, QTextLayout
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QDialog,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -44,6 +48,9 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -71,6 +78,7 @@ LOG_TIMESTAMP_RE = re.compile(
 LOG_LEVEL_RE = re.compile(r"\b(CRITICAL|ERROR|WARNING|WARN|INFO|DEBUG|TRACE)\b", re.IGNORECASE)
 LOG_PREVIEW_LINES = 20_000
 LOG_FILE_LIST_LIMIT = 50
+COMPARE_TIME_ROLE = Qt.UserRole + 1
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,96 @@ def summarise_value(value: Any, max_items: int = 8) -> str:
     return f"shape={arr.shape}, [{preview}]"
 
 
+def argument_rows_from_expid(expid: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """Return the same display rows used by the parameter panel and comparison."""
+    arguments = expid.get("arguments", {})
+    if not isinstance(arguments, dict):
+        return []
+
+    rows: list[tuple[str, str, str]] = []
+    for name, stored_value in arguments.items():
+        if name == "ndscan_params":
+            continue
+        value = stored_value
+        note = ""
+        if isinstance(stored_value, dict):
+            if "override" in stored_value and stored_value["override"] is not None:
+                value = stored_value["override"]
+                note = " (override)"
+            elif "default" in stored_value:
+                value = stored_value["default"]
+                note = " (default)"
+        rows.append((str(name), f"{summarise_value(value)}{note}", str(name)))
+
+    try:
+        vendor_root = Path(__file__).resolve().parent / "vendor"
+        vendor_text = str(vendor_root)
+        if vendor_root.exists() and vendor_text not in sys.path:
+            sys.path.insert(0, vendor_text)
+        from ndscan.results.arguments import extract_param_schema, format_numeric, format_scan_range
+        params = extract_param_schema(arguments)
+    except Exception:
+        params = None
+
+    if params:
+        schemata = params.get("schemata", {})
+        overrides = params.get("overrides", {})
+        axes_by_fqn: dict[str, list[dict[str, Any]]] = {}
+        for axis in params.get("scan", {}).get("axes", []):
+            axes_by_fqn.setdefault(str(axis.get("fqn", "")), []).append(axis)
+
+        def format_param_value(value: Any, schema: dict[str, Any]) -> str:
+            if isinstance(value, str):
+                try:
+                    value = ast.literal_eval(value)
+                except (SyntaxError, ValueError):
+                    pass
+            try:
+                return format_numeric(value, schema.get("spec", {}))
+            except Exception:
+                return summarise_value(value)
+
+        for fqn, schema in schemata.items():
+            fqn = str(fqn)
+            display_name = str(schema.get("description") or fqn)
+            identity = f"{display_name} {fqn}"
+            if "default" in schema:
+                value = format_param_value(schema["default"], schema)
+                rows.append((display_name, f"{value} (default)", identity))
+            for override in overrides.get(fqn, []):
+                path = str(override.get("path") or "*")
+                value = format_param_value(override.get("value"), schema)
+                rows.append((f"{display_name} @ {path}", f"{value} (override)", f"{identity} {path}"))
+            for axis in axes_by_fqn.get(fqn, []):
+                path = str(axis.get("path") or "*")
+                try:
+                    value = format_scan_range(str(axis.get("type", "")), axis.get("range", {}), schema)
+                except Exception:
+                    value = summarise_value(axis.get("range", {}))
+                rows.append((f"{display_name} @ {path}", f"{value} (scan)", f"{identity} {path}"))
+    elif "ndscan_params" in arguments:
+        rows.append(("ndscan_params", summarise_value(arguments["ndscan_params"]), "ndscan_params"))
+
+    return sorted(rows, key=lambda row: (row[0].casefold(), row[1].casefold()))
+
+
+def parameter_rows_for_comparison(rows: list[tuple[str, str, str]]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for name, value, identity in rows:
+        kind_match = re.search(r"\((default|override|scan)\)$", value)
+        kind = kind_match.group(1) if kind_match else ""
+        label = f"{name} [{kind}]" if kind else name
+        if label in values:
+            label = f"{label} — {identity}"
+        suffix = 2
+        unique_label = label
+        while unique_label in values:
+            unique_label = f"{label} #{suffix}"
+            suffix += 1
+        values[unique_label] = value
+    return values
+
+
 def is_numeric_dataset(dset: h5py.Dataset) -> bool:
     return getattr(dset.dtype, "kind", "") in NUMERIC_KINDS
 
@@ -283,6 +381,66 @@ class PlotCanvas(FigureCanvas):
         self.figure.subplots_adjust(left=0.12, right=0.88, bottom=0.14, top=0.9)
 
 
+class SearchHighlightDelegate(QStyledItemDelegate):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.terms: list[str] = []
+
+    def set_query(self, query: str) -> None:
+        self.terms = query.strip().casefold().split()
+        parent = self.parent()
+        if isinstance(parent, QAbstractItemView):
+            parent.viewport().update()
+
+    def paint(self, painter, option, index) -> None:
+        text = str(index.data(Qt.DisplayRole) or "")
+        if not text or not self.terms:
+            super().paint(painter, option, index)
+            return
+        style_option = QStyleOptionViewItem(option)
+        self.initStyleOption(style_option, index)
+        style = style_option.widget.style() if style_option.widget else QApplication.style()
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, style_option, style_option.widget)
+        display_text = style_option.fontMetrics.elidedText(text, Qt.ElideRight, max(0, text_rect.width()))
+        folded_text = display_text.casefold()
+        matches: list[tuple[int, int]] = []
+        for term in self.terms:
+            start = 0
+            while term:
+                found = folded_text.find(term, start)
+                if found < 0:
+                    break
+                matches.append((found, len(term)))
+                start = found + len(term)
+        if not matches:
+            super().paint(painter, option, index)
+            return
+        style_option.text = ""
+        style.drawControl(QStyle.CE_ItemViewItem, style_option, painter, style_option.widget)
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QColor(255, 225, 80))
+        highlight_format.setForeground(QColor(30, 30, 30))
+        ranges = []
+        for start, length in matches:
+            text_range = QTextLayout.FormatRange()
+            text_range.start = start
+            text_range.length = length
+            text_range.format = highlight_format
+            ranges.append(text_range)
+        layout = QTextLayout(display_text, style_option.font)
+        layout.setFormats(ranges)
+        layout.beginLayout()
+        line = layout.createLine()
+        line.setLineWidth(max(0, text_rect.width()))
+        layout.endLayout()
+        color_role = QPalette.HighlightedText if style_option.state & QStyle.State_Selected else QPalette.Text
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.setPen(style_option.palette.color(color_role))
+        layout.draw(painter, QPointF(text_rect.x(), text_rect.y() + (text_rect.height() - line.height()) / 2))
+        painter.restore()
+
+
 class NightlyMonitorGui(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -303,6 +461,9 @@ class NightlyMonitorGui(QMainWindow):
         self.loading_file = False
         self.current_infos: dict[str, DatasetInfo] = {}
         self.current_file: ResultFile | None = None
+        self.parameter_rows: list[tuple[str, str, str]] = []
+        self.parameter_popout: QDialog | None = None
+        self.panel_popouts: dict[QWidget, QDialog] = {}
         self.ndscan_widget: QWidget | None = None
         self.ndscan_h5_file: h5py.File | None = None
         self.log_files: list[LogFile] = []
@@ -332,10 +493,16 @@ class NightlyMonitorGui(QMainWindow):
         self.file_list = QListWidget()
         self.dataset_list = QListWidget()
         self.dataset_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.archive_filter_edit = QLineEdit()
+        self.archive_filter_edit.setPlaceholderText("Search archived dataset names, types, and values...")
         self.archive_table = QTableWidget(0, 3)
         self.archive_table.setHorizontalHeaderLabels(["Name", "Type", "Value"])
-        self.archive_table.horizontalHeader().setStretchLastSection(True)
+        archive_header = self.archive_table.horizontalHeader()
+        archive_header.setSectionResizeMode(0, QHeaderView.Stretch)
+        archive_header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        archive_header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.archive_table.setAlternatingRowColors(True)
+        self.archive_table.setItemDelegate(SearchHighlightDelegate(self.archive_table))
         self.x_combo = QComboBox()
         self.x_combo.addItem("Index / scalar history")
         self.ndscan_plot_button = QPushButton("Show ndscan Plot")
@@ -347,12 +514,40 @@ class NightlyMonitorGui(QMainWindow):
 
         self.meta_text = QTextEdit()
         self.meta_text.setReadOnly(True)
+        self.meta_text.setMaximumHeight(110)
+        self.argument_filter_edit = QLineEdit()
+        self.argument_filter_edit.setPlaceholderText("Search names, values, paths, types, defaults, overrides...")
+        self.argument_filter_edit.setClearButtonEnabled(True)
+        self.parameter_popout_button = QPushButton()
+        self.parameter_popout_button.setEnabled(False)
+        zoom_icon = QIcon.fromTheme("zoom-in")
+        if zoom_icon.isNull():
+            zoom_icon = self.style().standardIcon(QStyle.SP_TitleBarMaxButton)
+        self.parameter_popout_button.setIcon(zoom_icon)
+        self.parameter_popout_button.setAccessibleName("Zoom in parameters")
+        self.parameter_popout_button.setToolTip("Zoom in: open all parameters and full identities in a larger window.")
+        self.argument_count_label = QLabel("0 parameters")
+        self.argument_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.argument_table = QTableWidget(0, 2)
+        self.argument_table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        argument_header = self.argument_table.horizontalHeader()
+        argument_header.setStretchLastSection(True)
+        argument_header.setMinimumSectionSize(0)
+        argument_header.setSectionResizeMode(QHeaderView.Interactive)
+        self.argument_table.setAlternatingRowColors(True)
+        self.argument_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.argument_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.argument_table.setSortingEnabled(True)
+        self.argument_table.setWordWrap(False)
+        self.argument_table.verticalHeader().setVisible(False)
+        self.argument_table.setItemDelegate(SearchHighlightDelegate(self.argument_table))
         self.fit_table = QTableWidget(0, 3)
         self.fit_table.setHorizontalHeaderLabels(["Source", "Name", "Value"])
         self.fit_table.horizontalHeader().setStretchLastSection(True)
         self.raw_summary = QLabel("Select a dataset to inspect raw values.")
         self.raw_table = QTableWidget(0, 0)
         self.raw_table.setAlternatingRowColors(True)
+        self.raw_table.setTextElideMode(Qt.ElideRight)
         self.export_raw_button = QPushButton("Export CSV")
 
         self.log_path_edit = QLineEdit(DEFAULT_LOG_DIR)
@@ -370,11 +565,14 @@ class NightlyMonitorGui(QMainWindow):
         self.log_filter_edit.setPlaceholderText("Filter log text...")
         self.log_time_filter = QCheckBox("1am-7am only")
         self.log_time_filter.setToolTip("Show log entries timestamped from 01:00 up to before 07:00.")
+        self.log_errors_only = QCheckBox("Errors only")
+        self.log_errors_only.setChecked(True)
         self.log_status = QLabel()
         self.log_status.setMinimumWidth(220)
         self.log_status.setStyleSheet("color: #9a5a00;")
         self.log_file_list = QListWidget()
         self.log_text = QTreeWidget()
+        self.log_text.setItemDelegate(SearchHighlightDelegate(self.log_text))
         self.log_text.setHeaderHidden(True)
         self.log_text.setUniformRowHeights(True)
         self.log_text.setRootIsDecorated(True)
@@ -382,6 +580,39 @@ class NightlyMonitorGui(QMainWindow):
         log_font = QFont("Consolas")
         log_font.setStyleHint(QFont.Monospace)
         self.log_text.setFont(log_font)
+
+        self.compare_left = QComboBox()
+        self.compare_right = QComboBox()
+        for combo in (self.compare_left, self.compare_right):
+            combo.setEditable(True)
+            combo.setMaximumWidth(720)
+            combo.setInsertPolicy(QComboBox.NoInsert)
+            combo.lineEdit().setPlaceholderText("Select a result or type RID, date/RID, or file path")
+        self.compare_left_time = QLabel()
+        self.compare_right_time = QLabel()
+        for label in (self.compare_left_time, self.compare_right_time):
+            label.setMinimumWidth(62)
+            label.setStyleSheet("color: #888888;")
+        self.compare_left_browse = QPushButton("From Folder…")
+        self.compare_right_browse = QPushButton("From Folder…")
+        self.compare_button = QPushButton("Compare")
+        self.compare_button.setMinimumSize(180, 42)
+        compare_font = self.compare_button.font()
+        compare_font.setBold(True)
+        self.compare_button.setFont(compare_font)
+        self.compare_status = QLabel("Select two different result files, then click Compare.")
+        self.compare_filter_edit = QLineEdit()
+        self.compare_filter_edit.setPlaceholderText("Search settings, file values, and differences...")
+        self.compare_table = QTableWidget(0, 4)
+        self.compare_table.setHorizontalHeaderLabels(["Setting", "First file", "Second file", "Difference"])
+        compare_header = self.compare_table.horizontalHeader()
+        compare_header.setStretchLastSection(False)
+        for column in range(3):
+            compare_header.setSectionResizeMode(column, QHeaderView.Stretch)
+        compare_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.compare_table.setAlternatingRowColors(True)
+        self.compare_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.compare_table.setItemDelegate(SearchHighlightDelegate(self.compare_table))
 
         self.canvas = PlotCanvas()
         self.plot_stack = QStackedWidget()
@@ -400,6 +631,46 @@ class NightlyMonitorGui(QMainWindow):
                 "Default results path is unavailable; Browse will open from your home folder."
             )
 
+    def make_zoom_button(self, title: str, panel: QWidget) -> QPushButton:
+        button = QPushButton()
+        icon = QIcon.fromTheme("zoom-in")
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.SP_TitleBarMaxButton)
+        button.setIcon(icon)
+        button.setAccessibleName(f"Zoom in {title}")
+        button.setToolTip(f"Zoom in: open {title} in a larger window.")
+        button.clicked.connect(lambda _checked=False: self.toggle_panel_popout(panel, title))
+        return button
+
+    def toggle_panel_popout(self, panel: QWidget, title: str) -> None:
+        existing = self.panel_popouts.get(panel)
+        if existing is not None:
+            existing.close()
+            return
+        splitter = panel.parentWidget()
+        if not isinstance(splitter, QSplitter):
+            return
+        panel_index = splitter.indexOf(panel)
+        splitter_sizes = splitter.sizes()
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowTitle(f"{title} — Zoomed")
+        dialog.resize(1100, 760)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(panel)
+        self.panel_popouts[panel] = dialog
+        dialog.finished.connect(lambda _result: self.restore_zoomed_panel(panel, dialog, splitter, panel_index, splitter_sizes))
+        dialog.show()
+
+    def restore_zoomed_panel(self, panel: QWidget, dialog: QDialog, splitter: QSplitter, panel_index: int, sizes: list[int]) -> None:
+        if panel.parentWidget() is dialog:
+            if dialog.layout() is not None:
+                dialog.layout().removeWidget(panel)
+            splitter.insertWidget(panel_index, panel)
+            splitter.setSizes(sizes)
+        if self.panel_popouts.get(panel) is dialog:
+            del self.panel_popouts[panel]
+
     def _build_layout(self) -> None:
         top = QHBoxLayout()
         top.setSpacing(4)
@@ -417,11 +688,13 @@ class NightlyMonitorGui(QMainWindow):
         filter_row.addWidget(self.filter_edit)
 
         files_box = QGroupBox("Result Files")
+        filter_row.addWidget(self.make_zoom_button("Result Files", files_box))
         files_layout = QVBoxLayout(files_box)
         files_layout.addLayout(filter_row)
         files_layout.addWidget(self.file_list)
 
         data_box = QGroupBox("Result Datasets (Plot)")
+        data_zoom_button = self.make_zoom_button("Result Datasets", data_box)
         data_layout = QVBoxLayout(data_box)
         data_layout.addWidget(self.dataset_list)
         x_row = QHBoxLayout()
@@ -432,6 +705,7 @@ class NightlyMonitorGui(QMainWindow):
         button_row.addWidget(self.ndscan_plot_button)
         button_row.addWidget(self.plot_button)
         button_row.addWidget(self.history_button)
+        button_row.addWidget(data_zoom_button)
         data_layout.addLayout(button_row)
         data_layout.addWidget(self.auto_fit_curves)
 
@@ -441,31 +715,68 @@ class NightlyMonitorGui(QMainWindow):
 
         archive_box = QGroupBox("Archive Parameters")
         archive_layout = QVBoxLayout(archive_box)
+        archive_search_row = QHBoxLayout()
+        archive_search_row.addWidget(self.archive_filter_edit, 1)
+        archive_search_row.addWidget(self.make_zoom_button("Archive Parameters", archive_box))
+        archive_layout.addLayout(archive_search_row)
         archive_layout.addWidget(self.archive_table)
         left_split.addWidget(archive_box)
         left_split.setSizes([330, 260, 220])
 
         details_split = QSplitter(Qt.Vertical)
-        details_split.addWidget(self.meta_text)
 
-        fit_box = QGroupBox("Fit-Related Results")
+        details_box = QGroupBox("Experiment Details")
+        details_layout = QVBoxLayout(details_box)
+        details_layout.addWidget(self.meta_text)
+        argument_filter_row = QHBoxLayout()
+        argument_filter_row.addWidget(QLabel("Arguments"))
+        argument_filter_row.addWidget(self.argument_filter_edit, 1)
+        argument_filter_row.addWidget(self.argument_count_label)
+        argument_filter_row.addWidget(self.parameter_popout_button)
+        details_layout.addLayout(argument_filter_row)
+        details_layout.addWidget(self.argument_table, 1)
+        details_split.addWidget(details_box)
+
+        fit_box = QGroupBox()
+        fit_box.setAccessibleName("Fit-Related Results")
         fit_layout = QVBoxLayout(fit_box)
+        fit_header = QHBoxLayout()
+        fit_title = QLabel("Fit-Related Results")
+        fit_title.setStyleSheet("font-weight: bold;")
+        fit_header.addWidget(fit_title)
+        fit_header.addStretch(1)
+        fit_header.addWidget(self.make_zoom_button("Fit-Related Results", fit_box))
+        fit_layout.addLayout(fit_header)
         fit_layout.addWidget(self.fit_table)
         details_split.addWidget(fit_box)
 
         raw_box = QGroupBox("Raw Data")
         raw_layout = QVBoxLayout(raw_box)
-        raw_layout.addWidget(self.raw_summary)
+        raw_summary_row = QHBoxLayout()
+        raw_summary_row.addWidget(self.raw_summary, 1)
+        raw_summary_row.addWidget(self.make_zoom_button("Raw Data", raw_box))
+        raw_layout.addLayout(raw_summary_row)
         raw_layout.addWidget(self.raw_table)
         raw_layout.addWidget(self.export_raw_button)
         details_split.addWidget(raw_box)
-        details_split.setSizes([190, 190, 320])
+        details_split.setSizes([300, 170, 240])
 
         main_split = QSplitter(Qt.Horizontal)
         main_split.addWidget(left_split)
-        main_split.addWidget(self.plot_stack)
+        plot_box = QGroupBox()
+        plot_box.setAccessibleName("Plot")
+        plot_layout = QVBoxLayout(plot_box)
+        plot_header = QHBoxLayout()
+        plot_title = QLabel("Plot")
+        plot_title.setStyleSheet("font-weight: bold;")
+        plot_header.addWidget(plot_title)
+        plot_header.addStretch(1)
+        plot_header.addWidget(self.make_zoom_button("Plot", plot_box))
+        plot_layout.addLayout(plot_header)
+        plot_layout.addWidget(self.plot_stack, 1)
+        main_split.addWidget(plot_box)
         main_split.addWidget(details_split)
-        main_split.setSizes([360, 650, 290])
+        main_split.setSizes([340, 600, 360])
 
         data_tab = QWidget()
         data_layout_root = QVBoxLayout(data_tab)
@@ -473,15 +784,37 @@ class NightlyMonitorGui(QMainWindow):
         data_layout_root.addWidget(main_split, 1)
 
         log_tab = self.build_log_tab()
+        compare_tab = self.build_compare_tab()
 
         tabs = QTabWidget()
         tabs.addTab(data_tab, "Data")
         tabs.addTab(log_tab, "Logs")
+        tabs.addTab(compare_tab, "Compare Parameters")
 
         root = QWidget()
         layout = QVBoxLayout(root)
         layout.addWidget(tabs)
         self.setCentralWidget(root)
+
+    def build_compare_tab(self) -> QWidget:
+        controls = QGridLayout()
+        controls.addWidget(QLabel("First result"), 0, 0)
+        controls.addWidget(self.compare_left, 0, 1)
+        controls.addWidget(self.compare_left_time, 0, 2)
+        controls.addWidget(self.compare_left_browse, 0, 3)
+        controls.addWidget(QLabel("Second result"), 1, 0)
+        controls.addWidget(self.compare_right, 1, 1)
+        controls.addWidget(self.compare_right_time, 1, 2)
+        controls.addWidget(self.compare_right_browse, 1, 3)
+        controls.addWidget(self.compare_button, 1, 4)
+        controls.setColumnStretch(5, 1)
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addLayout(controls)
+        layout.addWidget(self.compare_status)
+        layout.addWidget(self.compare_filter_edit)
+        layout.addWidget(self.compare_table, 1)
+        return tab
 
     def build_log_tab(self) -> QWidget:
         top = QHBoxLayout()
@@ -498,6 +831,7 @@ class NightlyMonitorGui(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("Filter"))
         filter_row.addWidget(self.log_filter_edit)
+        filter_row.addWidget(self.log_errors_only)
         filter_row.addWidget(self.log_time_filter)
 
         list_box = QGroupBox("Log Files")
@@ -524,6 +858,9 @@ class NightlyMonitorGui(QMainWindow):
         self.browse_button.clicked.connect(self.choose_root)
         self.refresh_button.clicked.connect(lambda: self.refresh_files(force_scan=True))
         self.filter_edit.textChanged.connect(lambda _text: self.populate_file_list())
+        self.argument_filter_edit.textChanged.connect(self.filter_arguments)
+        self.parameter_popout_button.clicked.connect(self.show_parameter_popout)
+        self.archive_filter_edit.textChanged.connect(lambda text: self.filter_table(self.archive_table, text))
         self.monitor_only.stateChanged.connect(lambda _state: self.refresh_files(force_scan=False))
         self.max_files.currentTextChanged.connect(lambda _text: self.refresh_files(force_scan=False))
         self.file_list.currentItemChanged.connect(self.file_selected)
@@ -538,9 +875,185 @@ class NightlyMonitorGui(QMainWindow):
         self.log_date_edit.dateChanged.connect(lambda _date: self.populate_log_file_list())
         self.log_latest_only.stateChanged.connect(lambda _state: self.populate_log_file_list())
         self.log_filter_edit.textChanged.connect(lambda _text: self.load_selected_log())
+        self.log_errors_only.stateChanged.connect(lambda _state: self.load_selected_log())
         self.log_time_filter.stateChanged.connect(lambda _state: self.load_selected_log())
         self.log_file_list.currentItemChanged.connect(lambda current, _previous: self.log_file_selected(current))
+        self.compare_button.clicked.connect(self.compare_selected_files)
+        self.compare_left_browse.clicked.connect(lambda: self.browse_compare_file(self.compare_left, "first"))
+        self.compare_right_browse.clicked.connect(lambda: self.browse_compare_file(self.compare_right, "second"))
+        self.compare_left.lineEdit().returnPressed.connect(self.compare_selected_files)
+        self.compare_right.lineEdit().returnPressed.connect(self.compare_selected_files)
+        self.compare_left.currentIndexChanged.connect(lambda _index: self.update_compare_time_labels())
+        self.compare_right.currentIndexChanged.connect(lambda _index: self.update_compare_time_labels())
+        self.compare_left.lineEdit().textEdited.connect(lambda _text: self.compare_left_time.clear())
+        self.compare_right.lineEdit().textEdited.connect(lambda _text: self.compare_right_time.clear())
+        self.compare_filter_edit.textChanged.connect(lambda text: self.filter_table(self.compare_table, text))
         QTimer.singleShot(0, self.refresh_logs)
+
+    def update_compare_time_labels(self) -> None:
+        for combo, label in ((self.compare_left, self.compare_left_time), (self.compare_right, self.compare_right_time)):
+            start_time = combo.currentData(COMPARE_TIME_ROLE)
+            if isinstance(start_time, (int, float)):
+                label.setText(datetime.fromtimestamp(start_time).strftime("%H:%M:%S"))
+            else:
+                label.clear()
+
+    def update_compare_files(self) -> None:
+        selections = []
+        for combo in (self.compare_left, self.compare_right):
+            text = combo.currentText()
+            index = combo.currentIndex()
+            data = combo.itemData(index) if index >= 0 and text == combo.itemText(index) else None
+            selections.append((text, data))
+        for position, (combo, (text, selected_path)) in enumerate(zip((self.compare_left, self.compare_right), selections)):
+            blocker = QSignalBlocker(combo)
+            combo.clear()
+            for result in self.files:
+                combo.addItem(str(result.path), result.path)
+                combo.setItemData(combo.count() - 1, result.start_time, COMPARE_TIME_ROLE)
+                combo.setItemData(combo.count() - 1, str(result.path), Qt.ToolTipRole)
+            if isinstance(selected_path, Path):
+                index = combo.findData(selected_path)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                elif selected_path.is_file():
+                    self.add_compare_path(combo, selected_path)
+            elif text:
+                combo.setEditText(text)
+            elif combo.count():
+                combo.setCurrentIndex(min(position, combo.count() - 1))
+            del blocker
+        self.update_compare_time_labels()
+
+    def add_compare_path(self, combo: QComboBox, path: Path) -> None:
+        result = read_file_summary(path)
+        combo.addItem(str(path), path)
+        index = combo.count() - 1
+        combo.setItemData(index, result.start_time, COMPARE_TIME_ROLE)
+        combo.setItemData(index, str(path), Qt.ToolTipRole)
+        combo.setCurrentIndex(index)
+
+    def browse_compare_file(self, combo: QComboBox, side: str) -> None:
+        start_path = Path(self.path_edit.text()).expanduser()
+        if not path_is_available(start_path):
+            start_path = Path(DEFAULT_RESULTS_DIR)
+        filename, _ = QFileDialog.getOpenFileName(self, f"Select {side} result file", str(start_path), "HDF5 result files (*.h5 *.hdf5);;All files (*)")
+        if filename:
+            self.set_compare_combo_path(combo, Path(filename))
+
+    def set_compare_combo_path(self, combo: QComboBox, path: Path) -> None:
+        path = path.resolve()
+        index = combo.findData(path)
+        if index < 0:
+            self.add_compare_path(combo, path)
+        else:
+            combo.setCurrentIndex(index)
+        self.update_compare_time_labels()
+
+    def resolve_compare_path(self, combo: QComboBox) -> Path:
+        raw_text = combo.currentText()
+        index = combo.currentIndex()
+        if index >= 0 and raw_text == combo.itemText(index):
+            path = combo.itemData(index)
+            if isinstance(path, Path) and path.is_file():
+                return path
+        text = raw_text.strip()
+        if not text:
+            raise ValueError("no result was selected or entered")
+        entered = Path(text.strip('"')).expanduser()
+        current_root = Path(self.path_edit.text()).expanduser()
+        candidates = [entered]
+        if not entered.is_absolute():
+            candidates.extend([current_root / entered, Path(DEFAULT_RESULTS_DIR) / entered])
+            if LOG_DATE_RE.fullmatch(current_root.name):
+                candidates.append(current_root.parent / entered)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+            if candidate.is_dir():
+                files = list(candidate.glob("*.h5")) + list(candidate.glob("*.hdf5"))
+                if len(files) == 1:
+                    return files[0].resolve()
+                if files:
+                    raise ValueError(f"folder contains {len(files)} result files; add a RID or choose one file")
+        date_match = LOG_DATE_RE.search(text)
+        date_text = date_match.group(1) if date_match else ""
+        rid_matches = re.findall(r"(?<!\d)\d+(?!\d)", text.replace(date_text, " ") if date_text else text)
+        if not rid_matches:
+            raise ValueError("entry is not an existing file; enter a RID, date/RID, or complete file path")
+        rid = int(rid_matches[-1])
+        for result in self.files:
+            if result.rid == rid and (not date_text or date_text in result.path.parts):
+                return result.path
+        roots = [current_root, Path(DEFAULT_RESULTS_DIR)]
+        for root in roots:
+            if date_text:
+                root = root.parent / date_text if LOG_DATE_RE.fullmatch(root.name) else root / date_text
+            if not path_is_available(root):
+                continue
+            for pattern in ("*.h5", "*.hdf5"):
+                for path in root.rglob(pattern):
+                    if rid_from_path(path) == rid:
+                        return path.resolve()
+        raise ValueError(f"RID {rid}{' on ' + date_text if date_text else ''} was not found")
+
+    def comparison_values(self, path: Path) -> dict[str, Any]:
+        result = read_file_summary(path)
+        with h5py.File(path, "r") as h5:
+            expid = parse_expid(h5["expid"][()] if "expid" in h5 else "")
+        values: dict[str, Any] = {
+            "RID": result.rid,
+            "Start time": result.start_time,
+            "Run time": result.run_time,
+            "Class": result.class_name,
+            "Experiment file": result.file_name,
+        }
+        params = parameter_rows_for_comparison(argument_rows_from_expid(expid))
+        values.update({f"Parameter: {name}": value for name, value in params.items()})
+        return values
+
+    def compare_selected_files(self) -> None:
+        self.compare_table.clearContents()
+        self.compare_table.setRowCount(0)
+        try:
+            left = self.resolve_compare_path(self.compare_left)
+            right = self.resolve_compare_path(self.compare_right)
+        except (OSError, ValueError) as exc:
+            self.compare_status.setText(str(exc))
+            return
+        if left.resolve() == right.resolve():
+            self.compare_status.setText("The same result file is selected twice. Choose two different files.")
+            return
+        self.set_compare_combo_path(self.compare_left, left)
+        self.set_compare_combo_path(self.compare_right, right)
+        try:
+            left_values = self.comparison_values(left)
+            right_values = self.comparison_values(right)
+        except Exception as exc:
+            self.compare_status.setText(f"Could not compare files: {exc}")
+            return
+        priority = ["RID", "Start time", "Run time", "Class", "Experiment file"]
+        keys = sorted(set(left_values) | set(right_values), key=lambda key: (left_values.get(key, "<missing>") == right_values.get(key, "<missing>"), priority.index(key) if key in priority else len(priority), str(key).casefold()))
+        self.compare_table.setRowCount(len(keys))
+        self.compare_table.setHorizontalHeaderLabels(["Setting", left.name, right.name, "Difference"])
+        changed = 0
+        for row, key in enumerate(keys):
+            left_value = left_values.get(key, "<missing>")
+            right_value = right_values.get(key, "<missing>")
+            equal = left_value == right_value
+            changed += not equal
+            if isinstance(left_value, (int, float)) and isinstance(right_value, (int, float)):
+                difference = right_value - left_value
+            else:
+                difference = "same" if equal else "changed"
+            display = lambda value: format_time(value) if key == "Start time" else str(value)
+            items = [QTableWidgetItem(str(key)), QTableWidgetItem(display(left_value)), QTableWidgetItem(display(right_value)), QTableWidgetItem(str(difference))]
+            if not equal:
+                items[3].setBackground(QColor(255, 220, 220))
+            for column, item in enumerate(items):
+                self.compare_table.setItem(row, column, item)
+        self.filter_table(self.compare_table, self.compare_filter_edit.text())
+        self.compare_status.setText(f"Compared {left.name} with {right.name}: <b>{changed} out of {len(keys)} settings differ.</b>")
 
     def choose_log_root(self) -> None:
         start_dir = Path(self.log_path_edit.text()).expanduser()
@@ -648,6 +1161,9 @@ class NightlyMonitorGui(QMainWindow):
         self.load_selected_log()
 
     def load_selected_log(self) -> None:
+        delegate = self.log_text.itemDelegate()
+        if isinstance(delegate, SearchHighlightDelegate):
+            delegate.set_query(self.log_filter_edit.text())
         item = self.log_file_list.currentItem()
         if item is None:
             return
@@ -655,8 +1171,9 @@ class NightlyMonitorGui(QMainWindow):
         if not isinstance(log_file, LogFile):
             return
 
-        filter_text = self.log_filter_edit.text().strip().lower()
+        filter_terms = self.log_filter_edit.text().strip().casefold().split()
         time_filter_enabled = self.log_time_filter.isChecked()
+        errors_only_enabled = self.log_errors_only.isChecked()
         self.log_text.clear()
         shown = 0
         total = 0
@@ -673,16 +1190,23 @@ class NightlyMonitorGui(QMainWindow):
                 current_title = ""
                 current_children = []
                 return
-            if filter_text:
-                title_matches = filter_text in current_title.lower()
+            if errors_only_enabled and not (self.log_line_level(current_title) == "error" or any(self.log_line_level(child) == "error" for child in current_children)):
+                current_title = ""
+                current_children = []
+                return
+            if filter_terms:
+                folded_title = current_title.casefold()
+                title_matches = all(term in folded_title for term in filter_terms)
                 matching_children = [
-                    child for child in current_children if filter_text in child.lower()
+                    child for child in current_children
+                    if all(term in f"{folded_title} {child.casefold()}" for term in filter_terms)
                 ]
-                if not title_matches and not matching_children:
+                combined = " ".join([folded_title, *(child.casefold() for child in current_children)])
+                if not all(term in combined for term in filter_terms):
                     current_title = ""
                     current_children = []
                     return
-                display_children = current_children if title_matches else matching_children
+                display_children = current_children if title_matches or not matching_children else matching_children
             else:
                 display_children = current_children
 
@@ -726,15 +1250,15 @@ class NightlyMonitorGui(QMainWindow):
                 f"Only the first {LOG_PREVIEW_LINES:,} matching lines are shown.",
                 "debug",
             )
-        if filter_text:
-            scope = "1am-7am " if time_filter_enabled else ""
-            self.show_log_status(
-                f"Showing {shown:,} of {matched:,} {scope}matching line(s) in {log_file.path.name}."
-            )
-        elif time_filter_enabled:
-            self.show_log_status(
-                f"Showing {shown:,} 1am-7am line(s) from {log_file.path.name}."
-            )
+        if filter_terms or time_filter_enabled or errors_only_enabled:
+            scopes = []
+            if errors_only_enabled:
+                scopes.append("error")
+            if time_filter_enabled:
+                scopes.append("1am-7am")
+            if filter_terms:
+                scopes.append("text-filtered")
+            self.show_log_status(f"Showing {shown:,} of {matched:,} {', '.join(scopes)} line(s) in {log_file.path.name}.")
         else:
             self.show_log_status(f"Showing {shown:,} of {total:,} line(s) in {log_file.path.name}.")
 
@@ -747,6 +1271,8 @@ class NightlyMonitorGui(QMainWindow):
             self.apply_log_item_style(child_item, level)
             parent.addChild(child_item)
         self.log_text.addTopLevelItem(parent)
+        if self.log_filter_edit.text().strip() and children:
+            parent.setExpanded(True)
 
     def show_log_message(self, message: str, level: str = "plain") -> None:
         item = QTreeWidgetItem([message])
@@ -1042,6 +1568,7 @@ class NightlyMonitorGui(QMainWindow):
         if self.file_list.count() and (auto_load_selected or selected_row >= 0):
             self.file_list.setCurrentRow(selected_row if selected_row >= 0 else 0)
         del blocker
+        self.update_compare_files()
         current = self.file_list.currentItem()
         if current is None:
             self.current_file = None
@@ -1080,9 +1607,15 @@ class NightlyMonitorGui(QMainWindow):
     def load_file(self, result: ResultFile) -> None:
         self.close_ndscan_plot()
         self.show_matplotlib_plot()
+        if self.parameter_popout is not None:
+            self.parameter_popout.close()
         self.loading_file = True
         self.dataset_list.clear()
         self.archive_table.setRowCount(0)
+        self.argument_table.setRowCount(0)
+        self.parameter_rows = []
+        self.parameter_popout_button.setEnabled(False)
+        self.update_argument_count()
         self.clear_raw_table()
         self.x_combo.clear()
         self.x_combo.addItem("Index / scalar history")
@@ -1092,6 +1625,7 @@ class NightlyMonitorGui(QMainWindow):
                 infos = iter_numeric_datasets(h5, roots=("datasets",))
                 archive_rows = iter_archive_rows(h5)
                 meta = self.describe_file(h5, result)
+                argument_rows = self.collect_argument_rows(h5)
                 fit_rows = self.collect_fit_rows(h5)
         except Exception as exc:
             self.loading_file = False
@@ -1099,6 +1633,7 @@ class NightlyMonitorGui(QMainWindow):
             return
 
         self.meta_text.setPlainText(meta)
+        self.populate_argument_table(argument_rows)
         self.populate_archive_table(archive_rows)
         self.populate_fit_table(fit_rows)
 
@@ -1162,21 +1697,111 @@ class NightlyMonitorGui(QMainWindow):
             f"Start: {format_time(result.start_time)}",
             f"Run time: {'' if result.run_time is None else result.run_time}",
         ]
-        if "expid" in h5:
-            expid = parse_expid(h5["expid"][()])
-            args = expid.get("arguments", {})
-            if args:
-                lines.append("\nArguments:")
-                for key, value in sorted(args.items()):
-                    lines.append(f"  {key}: {value}")
         return "\n".join(lines)
+
+    def collect_argument_rows(self, h5: h5py.File) -> list[tuple[str, str, str]]:
+        if "expid" not in h5:
+            return []
+        return argument_rows_from_expid(parse_expid(h5["expid"][()]))
+
+    def populate_argument_table(self, rows: list[tuple[str, str, str]]) -> None:
+        self.parameter_rows = list(rows)
+        self.parameter_popout_button.setEnabled(bool(rows))
+        self.argument_table.setSortingEnabled(False)
+        self.argument_table.setRowCount(len(rows))
+        for row_idx, (name, value, identity) in enumerate(rows):
+            name_item = QTableWidgetItem(name)
+            value_item = QTableWidgetItem(value)
+            name_item.setData(Qt.UserRole, identity)
+            name_item.setToolTip(identity)
+            value_item.setToolTip(value)
+            self.argument_table.setItem(row_idx, 0, name_item)
+            self.argument_table.setItem(row_idx, 1, value_item)
+        self.argument_table.setSortingEnabled(True)
+        self.argument_table.sortItems(0, Qt.AscendingOrder)
+        available_width = self.argument_table.viewport().width()
+        if available_width > 0:
+            self.argument_table.setColumnWidth(0, max(120, int(available_width * 0.45)))
+        self.filter_arguments()
+
+    def filter_arguments(self, _text: str = "") -> None:
+        self.filter_table(self.argument_table, self.argument_filter_edit.text())
+        self.update_argument_count()
+
+    @staticmethod
+    def filter_table(table: QTableWidget, query: str) -> None:
+        terms = query.strip().casefold().split()
+        delegate = table.itemDelegate()
+        if isinstance(delegate, SearchHighlightDelegate):
+            delegate.set_query(query)
+        for row in range(table.rowCount()):
+            parts = []
+            for column in range(table.columnCount()):
+                item = table.item(row, column)
+                if item is None:
+                    continue
+                for role in (Qt.DisplayRole, Qt.ToolTipRole, Qt.UserRole):
+                    value = item.data(role)
+                    if value is not None:
+                        parts.append(str(value))
+            searchable = " ".join(parts).casefold()
+            table.setRowHidden(row, any(term not in searchable for term in terms))
+
+    def show_parameter_popout(self) -> None:
+        if not self.parameter_rows:
+            return
+        if self.parameter_popout is not None:
+            self.parameter_popout.close()
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        dialog.setWindowTitle("All Experiment Parameters / Settings")
+        dialog.resize(1050, 720)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Search all names, values, full identities, paths, and setting types...")
+        layout.addWidget(search)
+        table = QTableWidget(len(self.parameter_rows), 3)
+        table.setHorizontalHeaderLabels(["Parameter", "Value", "Full identity / path"])
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setItemDelegate(SearchHighlightDelegate(table))
+        for row_idx, row in enumerate(self.parameter_rows):
+            for column, text in enumerate(row):
+                item = QTableWidgetItem(text)
+                item.setToolTip(text)
+                table.setItem(row_idx, column, item)
+        for column in range(3):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+        layout.addWidget(table, 1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button, 0, Qt.AlignRight)
+        search.textChanged.connect(lambda text: self.filter_table(table, text))
+        dialog.finished.connect(lambda _result: self.clear_parameter_popout(dialog))
+        self.parameter_popout = dialog
+        dialog.show()
+
+    def clear_parameter_popout(self, dialog: QDialog) -> None:
+        if self.parameter_popout is dialog:
+            self.parameter_popout = None
+
+    def update_argument_count(self) -> None:
+        total = self.argument_table.rowCount()
+        visible = sum(not self.argument_table.isRowHidden(row) for row in range(total))
+        if visible == total:
+            label = f"{total} parameter{'s' if total != 1 else ''}"
+        else:
+            label = f"{visible} of {total}"
+        self.argument_count_label.setText(label)
 
     def populate_archive_table(self, rows: list[tuple[str, str, str]]) -> None:
         self.archive_table.setRowCount(len(rows))
         for row_idx, row in enumerate(rows):
             for col_idx, value in enumerate(row):
-                self.archive_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
-        self.archive_table.resizeColumnsToContents()
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.archive_table.setItem(row_idx, col_idx, item)
+        self.filter_table(self.archive_table, self.archive_filter_edit.text())
 
     def collect_fit_rows(self, h5: h5py.File) -> list[tuple[str, str, str]]:
         rows: list[tuple[str, str, str]] = []
@@ -1280,7 +1905,31 @@ class NightlyMonitorGui(QMainWindow):
             self.raw_summary.setText(
                 self.raw_summary.text() + f" | flattened, showing first {rows} values"
             )
+        for row in range(self.raw_table.rowCount()):
+            for column in range(self.raw_table.columnCount()):
+                item = self.raw_table.item(row, column)
+                if item is not None:
+                    item.setToolTip(item.text())
+        self.fit_raw_table_columns()
+
+    def fit_raw_table_columns(self) -> None:
+        count = self.raw_table.columnCount()
+        if not count:
+            return
+        header = self.raw_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        if count == 1:
+            header.setSectionResizeMode(0, QHeaderView.Stretch)
+            return
+        if count == 2:
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
+            return
+        header.setSectionResizeMode(QHeaderView.Interactive)
         self.raw_table.resizeColumnsToContents()
+        target = max(44, min(90, self.raw_table.viewport().width() // min(count, 8)))
+        for column in range(count):
+            header.resizeSection(column, max(44, min(self.raw_table.columnWidth(column), target)))
 
     def export_raw_csv(self) -> None:
         infos = self.selected_infos()
